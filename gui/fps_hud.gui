@@ -1,0 +1,241 @@
+script: "/gui/fps_hud.gui_script"
+fonts {
+  name: "hud_font"
+  font: "/assets/default.font"
+}
+nodes {
+  position {
+    x: 20.0
+    y: 700.0
+  }
+  size {
+    x: 320.0
+    y: 24.0
+  }
+  color {
+    x: 0.98
+    y: 0.98
+    z: 0.98
+  }
+  type: TYPE_TEXT
+  text: "FPS: --"
+  font: "hud_font"
+  id: "fps_text"
+  xanchor: XANCHOR_LEFT
+  yanchor: YANCHOR_TOP
+  pivot: PIVOT_NW
+  layer: "text"
+  outline_alpha: 0.0
+}
+nodes {
+  position {
+    x: 20.0
+    y: 664.0
+  }
+  size {
+    x: 200.0
+    y: 30.0
+  }
+  type: TYPE_BOX
+  id: "expand_button"
+  xanchor: XANCHOR_LEFT
+  yanchor: YANCHOR_TOP
+  pivot: PIVOT_NW
+  layer: "panel"
+  visible: false
+}
+nodes {
+  size {
+    x: 200.0
+    y: 30.0
+  }
+  color {
+    x: 0.06
+    y: 0.06
+    z: 0.07
+  }
+  type: TYPE_BOX
+  id: "expand_background"
+  pivot: PIVOT_NW
+  parent: "expand_button"
+  layer: "panel"
+  alpha: 0.85
+}
+nodes {
+  position {
+    x: 100.0
+    y: -15.0
+  }
+  scale {
+    x: 0.8
+    y: 0.8
+  }
+  size {
+    x: 220.0
+    y: 24.0
+  }
+  color {
+    x: 0.95
+    y: 0.95
+    z: 0.95
+  }
+  type: TYPE_TEXT
+  text: "Expand settings"
+  font: "hud_font"
+  id: "expand_label"
+  parent: "expand_button"
+  layer: "text"
+  outline_alpha: 0.0
+  shadow_alpha: 0.0
+}
+nodes {
+  position {
+    x: 12.0
+    y: 664.0
+  }
+  size {
+    x: 476.0
+    y: 520.0
+  }
+  color {
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  }
+  type: TYPE_BOX
+  id: "settings_panel"
+  xanchor: XANCHOR_LEFT
+  yanchor: YANCHOR_TOP
+  pivot: PIVOT_NW
+  alpha: 0.3
+}
+nodes {
+  position {
+    x: 14.0
+    y: -12.0
+  }
+  type: TYPE_BOX
+  id: "slider_root"
+  pivot: PIVOT_NW
+  parent: "settings_panel"
+  layer: "panel"
+  visible: false
+}
+nodes {
+  scale {
+    x: 0.75
+    y: 0.75
+  }
+  size {
+    x: 580.0
+    y: 20.0
+  }
+  type: TYPE_TEXT
+  text: "M.SETTING = 0"
+  font: "hud_font"
+  id: "slider_label"
+  pivot: PIVOT_NW
+  parent: "slider_root"
+  layer: "text"
+  outline_alpha: 0.0
+}
+nodes {
+  position {
+    y: -25.0
+  }
+  size {
+    x: 448.0
+    y: 6.0
+  }
+  color {
+    x: 0.3
+    y: 0.3
+    z: 0.32
+  }
+  type: TYPE_BOX
+  id: "slider_track"
+  pivot: PIVOT_W
+  parent: "slider_root"
+  layer: "panel"
+  alpha: 0.9
+}
+nodes {
+  position {
+    x: 7.0
+    y: -25.0
+  }
+  size {
+    x: 14.0
+    y: 14.0
+  }
+  color {
+    x: 0.96
+    y: 0.96
+    z: 0.96
+  }
+  type: TYPE_BOX
+  id: "slider_handle"
+  parent: "slider_root"
+  layer: "panel"
+}
+nodes {
+  position {
+    x: 14.0
+    y: -470.0
+  }
+  size {
+    x: 200.0
+    y: 30.0
+  }
+  type: TYPE_BOX
+  id: "collapse_button"
+  pivot: PIVOT_NW
+  parent: "settings_panel"
+  layer: "panel"
+  visible: false
+}
+nodes {
+  size {
+    x: 200.0
+    y: 30.0
+  }
+  color {
+    x: 0.06
+    y: 0.06
+    z: 0.07
+  }
+  type: TYPE_BOX
+  id: "collapse_background"
+  pivot: PIVOT_NW
+  parent: "collapse_button"
+  alpha: 0.85
+}
+nodes {
+  position {
+    x: 100.0
+    y: -15.0
+  }
+  scale {
+    x: 0.8
+    y: 0.8
+  }
+  size {
+    x: 220.0
+    y: 24.0
+  }
+  type: TYPE_TEXT
+  text: "Collapse settings"
+  font: "hud_font"
+  id: "collapse_label"
+  parent: "collapse_button"
+  layer: "text"
+  outline_alpha: 0.0
+  shadow_alpha: 0.0
+}
+layers {
+  name: "panel"
+}
+layers {
+  name: "text"
+}
+material: "/builtins/materials/gui.material"

@@ -1,0 +1,225 @@
+-- Spawns the gems, orbits the camera around the scene center on mouse drag (with inertia)
+-- and runs the autofocus. Camera and focus are sent to the render script every frame.
+
+local consts = require("config.consts")
+local scene_layout = require("objects.scene_layout")
+
+local H_TOUCH = hash("touch")
+local RENDER_URL = "@render:"
+local GEM_FACTORY_URL = msg.url("main:/app#gem_factory")
+
+local SCENE_CENTER = vmath.vector3(0.0, 0.0, 0.0)
+local WORLD_UP = vmath.vector3(0.0, 1.0, 0.0)
+
+local function clamp(value, min_value, max_value)
+	if value < min_value then
+		return min_value
+	end
+	if value > max_value then
+		return max_value
+	end
+	return value
+end
+
+local function move_towards(current, target, max_delta)
+	if current < target then
+		return math.min(current + max_delta, target)
+	end
+
+	return math.max(current - max_delta, target)
+end
+
+local function normalize_angle(angle)
+	local two_pi = math.pi * 2.0
+	return (angle + math.pi) % two_pi - math.pi
+end
+
+local function get_smoothing_alpha(dt, smooth_time)
+	if smooth_time <= 0.0 then
+		return 1.0
+	end
+
+	return 1.0 - math.exp(-dt / smooth_time)
+end
+
+local function get_autofocus_radius(radius)
+	return radius * (1.0 - consts.DOF_AUTOFOCUS_SPHERE_SHRINK)
+end
+
+local function build_focus_targets(descriptors)
+	local targets = {}
+
+	for i = 1, #descriptors do
+		local descriptor = descriptors[i]
+		targets[i] = {
+			position = descriptor.position,
+			radius = get_autofocus_radius(descriptor.radius),
+		}
+	end
+
+	return targets
+end
+
+local function intersect_ray_sphere(origin, direction, center, radius)
+	local offset = origin - center
+	local b = vmath.dot(offset, direction)
+	local c = vmath.dot(offset, offset) - radius * radius
+	local discriminant = b * b - c
+
+	if discriminant < 0.0 then
+		return nil
+	end
+
+	local root = math.sqrt(discriminant)
+	local distance = -b - root
+	if distance >= 0.0 then
+		return distance
+	end
+
+	distance = -b + root
+	if distance >= 0.0 then
+		return distance
+	end
+
+	return nil
+end
+
+local function find_focus_target_distance(self)
+	local to_center = SCENE_CENTER - self.position
+	local max_distance = vmath.length(to_center)
+	local direction = vmath.normalize(to_center)
+	local nearest_hit = nil
+	local targets = self.focus_targets
+
+	for i = 1, #targets do
+		local target = targets[i]
+		local hit_distance = intersect_ray_sphere(self.position, direction, target.position, target.radius)
+		if hit_distance and hit_distance <= max_distance and (not nearest_hit or hit_distance < nearest_hit) then
+			nearest_hit = hit_distance
+		end
+	end
+
+	return math.max(nearest_hit or max_distance, consts.CAMERA_NEAR)
+end
+
+local function update_camera_state(self)
+	local cp = math.cos(self.pitch)
+	local sp = math.sin(self.pitch)
+	local cy = math.cos(self.yaw)
+	local sy = math.sin(self.yaw)
+
+	self.position = vmath.vector3(sy * cp, sp, cy * cp) * consts.CAMERA_ORBIT_RADIUS
+	self.forward = vmath.normalize(SCENE_CENTER - self.position)
+	self.right = vmath.normalize(vmath.cross(self.forward, WORLD_UP))
+	self.up = vmath.normalize(vmath.cross(self.right, self.forward))
+end
+
+local function update_camera_rotation(self, dt)
+	local drag_speed = consts.CAMERA_DRAG_SPEED
+	local smooth_time = consts.CAMERA_INPUT_SMOOTH_TIME
+	local pitch_limit = consts.CAMERA_PITCH_LIMIT
+	local alpha = get_smoothing_alpha(dt, smooth_time)
+	local raw_dx = self.pending_dx
+	local raw_dy = self.pending_dy
+	local target_yaw_velocity = 0.0
+	local target_pitch_velocity = 0.0
+
+	self.pending_dx = 0.0
+	self.pending_dy = 0.0
+
+	if dt > 0.0 then
+		local inv_dt = 1.0 / dt
+		target_yaw_velocity = -raw_dx * drag_speed * inv_dt
+		target_pitch_velocity = -raw_dy * drag_speed * inv_dt
+	end
+
+	self.yaw_velocity = self.yaw_velocity + (target_yaw_velocity - self.yaw_velocity) * alpha
+	self.pitch_velocity = self.pitch_velocity + (target_pitch_velocity - self.pitch_velocity) * alpha
+	self.yaw = normalize_angle(self.yaw + self.yaw_velocity * dt)
+
+	local unclamped_pitch = self.pitch + self.pitch_velocity * dt
+	local clamped_pitch = clamp(unclamped_pitch, -pitch_limit, pitch_limit)
+	if clamped_pitch ~= unclamped_pitch then
+		self.pitch_velocity = 0.0
+	end
+	self.pitch = clamped_pitch
+end
+
+local function update_focus_state(self, dt)
+	local target_distance = find_focus_target_distance(self)
+	if not self.focus_distance then
+		self.focus_distance = target_distance
+		return
+	end
+
+	self.focus_distance = move_towards(self.focus_distance, target_distance, consts.DOF_AUTOFOCUS_SPEED * dt)
+end
+
+local function send_camera(self)
+	msg.post(RENDER_URL, "set_room_camera", {
+		position = self.position,
+		forward = self.forward,
+		right = self.right,
+		up = self.up,
+		fov = self.fov,
+		focus_distance = self.focus_distance,
+	})
+end
+
+local function spawn_objects(self)
+	local descriptors = scene_layout.build_descriptors()
+	self.focus_targets = build_focus_targets(descriptors)
+
+	for i = 1, #descriptors do
+		local descriptor = descriptors[i]
+		local id = factory.create(GEM_FACTORY_URL, descriptor.position)
+		msg.post(id, "setup", descriptor)
+	end
+end
+
+function init(self)
+	-- The HUD acquires focus after the camera, so it sees clicks first and can keep its
+	-- buttons and sliders from also orbiting the camera.
+	msg.post(".", "acquire_input_focus")
+	msg.post("/fps_hud", "acquire_input_focus")
+
+	self.dragging = false
+	self.pending_dx = 0.0
+	self.pending_dy = 0.0
+	self.yaw = consts.CAMERA_START_YAW
+	self.pitch = consts.CAMERA_START_PITCH
+	self.yaw_velocity = 0.0
+	self.pitch_velocity = 0.0
+	self.fov = consts.CAMERA_FOV
+
+	spawn_objects(self)
+	update_camera_state(self)
+	update_focus_state(self, 0.0)
+	send_camera(self)
+end
+
+function update(self, dt)
+	update_camera_rotation(self, dt)
+	update_camera_state(self)
+	update_focus_state(self, dt)
+	send_camera(self)
+end
+
+function on_input(self, action_id, action)
+	if action_id ~= H_TOUCH then
+		return false
+	end
+
+	if action.pressed then
+		self.dragging = true
+		self.pending_dx = 0.0
+		self.pending_dy = 0.0
+	elseif action.released then
+		self.dragging = false
+	elseif self.dragging then
+		self.pending_dx = self.pending_dx + action.dx
+		self.pending_dy = self.pending_dy + action.dy
+	end
+
+	return self.dragging or action.released
+end

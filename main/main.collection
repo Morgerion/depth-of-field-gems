@@ -1,0 +1,14 @@
+name: "main"
+instances {
+  id: "app"
+  prototype: "/main/app.go"
+}
+instances {
+  id: "room_quad"
+  prototype: "/scene/room_quad.go"
+}
+instances {
+  id: "fps_hud"
+  prototype: "/main/fps_hud.go"
+}
+scale_along_z: 0

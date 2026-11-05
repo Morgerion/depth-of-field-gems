@@ -1,0 +1,20 @@
+[project]
+title = Depth of Field Gems
+custom_resources = /geometry/gems/
+
+[display]
+width = 1280
+height = 720
+high_dpi = 1
+
+[input]
+game_binding = /builtins/input/all.input_bindingc
+use_accelerometer = 0
+
+[bootstrap]
+main_collection = /main/main.collectionc
+render = /render/gem_room.renderc
+
+[html5]
+heap_size = 64
+

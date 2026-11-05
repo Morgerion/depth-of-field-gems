@@ -1,0 +1,414 @@
+-- Render pipeline of the demo:
+--   1. scene: the analytic room as a fullscreen quad (writes depth), then the gems,
+--      into rt_scene (RGBM-packed HDR color + depth);
+--   2. depth of field, either the fast path
+--        dof_prepare -> dof_tile_max -> dof_tile_dilate -> dof_gather [-> dof_temporal -> dof_tonemap]
+--      or, when RGBA16F render targets are unavailable, the original single pass dof_present;
+--   3. GUI on top.
+-- The room quad (tags "room" and "post") also serves as the geometry for every fullscreen pass.
+
+local consts = require("config.consts")
+
+local MSG_SET_ROOM_CAMERA = hash("set_room_camera")
+local MSG_SET_DEBUG_TUNING = hash("set_debug_tuning")
+
+local BUFFER_COLOR0_BIT = graphics.BUFFER_TYPE_COLOR0_BIT
+local BUFFER_DEPTH_BIT = graphics.BUFFER_TYPE_DEPTH_BIT
+
+-- Defold 1.14.0 removed render.FORMAT_* / render.FILTER_* / render.WRAP_* (now nil),
+-- so graphics.TEXTURE_* is used; the old names are kept as a fallback for 1.12.x. See ENGINE.md.
+local FORMAT_RGBA = graphics.TEXTURE_FORMAT_RGBA or render.FORMAT_RGBA
+local FORMAT_DEPTH = graphics.TEXTURE_FORMAT_DEPTH or render.FORMAT_DEPTH
+local FILTER_NEAREST = graphics.TEXTURE_FILTER_NEAREST or render.FILTER_NEAREST
+local FILTER_LINEAR = graphics.TEXTURE_FILTER_LINEAR or render.FILTER_LINEAR
+local WRAP_CLAMP_TO_EDGE = graphics.TEXTURE_WRAP_CLAMP_TO_EDGE or render.WRAP_CLAMP_TO_EDGE
+-- nil if the device does not support RGBA16F: DoF then takes the original single pass.
+local FORMAT_RGBA16F = graphics.TEXTURE_FORMAT_RGBA16F
+
+-- DoF fast path (see shaders/dof_fast_common.glsl): tile size for the maximum blur radius
+-- search (at most DOF_MAX_TILE_SIZE in the shaders) and the dilation limit over neighboring
+-- tiles (must match DOF_MAX_DILATION in the shaders).
+local DOF_TILE_SIZE = 16
+local DOF_MAX_DILATION = 4
+assert(consts.DOF_MAX_BLUR_RADIUS_PX <= DOF_TILE_SIZE * DOF_MAX_DILATION,
+	"DOF_MAX_BLUR_RADIUS_PX is larger than the tile search can reach")
+-- Wraps around so that frame * golden ratio in the shaders keeps float precision.
+local FRAME_INDEX_PERIOD = 4096
+
+local CLEAR_COLOR = vmath.vector4(0.0, 0.0, 0.0, 0.0)
+
+local function create_target_params(format, width, height, filter, flags)
+	return {
+		format = format,
+		width = width,
+		height = height,
+		flags = flags or 0,
+		min_filter = filter,
+		mag_filter = filter,
+		u_wrap = WRAP_CLAMP_TO_EDGE,
+		v_wrap = WRAP_CLAMP_TO_EDGE,
+	}
+end
+
+local function create_color_target(name, format, width, height, filter)
+	return render.render_target(name, {
+		[BUFFER_COLOR0_BIT] = create_target_params(format, width, height, filter),
+	})
+end
+
+local function delete_render_targets(targets)
+	for _, target in ipairs(targets) do
+		render.delete_render_target(target)
+	end
+end
+
+local function create_render_targets(self)
+	local width, height = self.width, self.height
+	self.rt_scene = render.render_target("rt_scene", {
+		[BUFFER_COLOR0_BIT] = create_target_params(FORMAT_RGBA, width, height, FILTER_NEAREST),
+		[BUFFER_DEPTH_BIT] = create_target_params(FORMAT_DEPTH, width, height, FILTER_NEAREST, render.TEXTURE_BIT),
+	})
+
+	self.dof_fast = false
+	self.dof_temporal = false
+	if not consts.DOF_FAST_PATH or not FORMAT_RGBA16F then
+		print("DoF: original single pass (dof_present)")
+		return
+	end
+
+	local created = {}
+	local function create(name, format, w, h, filter)
+		local target = create_color_target(name, format, w, h, filter)
+		created[#created + 1] = target
+		return target
+	end
+
+	local ok, err = pcall(function()
+		self.rt_dof_source = create("rt_dof_source", FORMAT_RGBA16F, width, height, FILTER_LINEAR)
+		self.rt_dof_tiles = create("rt_dof_tiles", FORMAT_RGBA, self.tile_width, self.tile_height, FILTER_NEAREST)
+		self.rt_dof_tiles_dilated = create("rt_dof_tiles_dilated", FORMAT_RGBA, self.tile_width, self.tile_height, FILTER_NEAREST)
+		if consts.DOF_TEMPORAL then
+			-- The frame's gather result and two history buffers that swap roles every frame.
+			self.rt_dof_current = create("rt_dof_current", FORMAT_RGBA16F, width, height, FILTER_NEAREST)
+			self.rt_dof_history = {
+				create("rt_dof_history_1", FORMAT_RGBA16F, width, height, FILTER_LINEAR),
+				create("rt_dof_history_2", FORMAT_RGBA16F, width, height, FILTER_LINEAR),
+			}
+		end
+	end)
+
+	if not ok then
+		delete_render_targets(created)
+		print("DoF: RGBA16F render targets failed, using the original single pass: " .. tostring(err))
+		return
+	end
+
+	self.dof_fast = true
+	self.dof_temporal = consts.DOF_TEMPORAL
+	self.history_read = 1
+	self.history_reset = true
+	print(self.dof_temporal and "DoF: fast path with temporal accumulation" or "DoF: fast path")
+end
+
+local function set_size(self, width, height)
+	self.width = width
+	self.height = height
+	self.tile_width = math.ceil(width / DOF_TILE_SIZE)
+	self.tile_height = math.ceil(height / DOF_TILE_SIZE)
+end
+
+local function resize_render_targets(self, width, height)
+	set_size(self, width, height)
+
+	render.set_render_target_size(self.rt_scene, width, height)
+	if self.dof_fast then
+		render.set_render_target_size(self.rt_dof_source, width, height)
+		render.set_render_target_size(self.rt_dof_tiles, self.tile_width, self.tile_height)
+		render.set_render_target_size(self.rt_dof_tiles_dilated, self.tile_width, self.tile_height)
+	end
+	if self.dof_temporal then
+		render.set_render_target_size(self.rt_dof_current, width, height)
+		render.set_render_target_size(self.rt_dof_history[1], width, height)
+		render.set_render_target_size(self.rt_dof_history[2], width, height)
+		self.history_reset = true
+	end
+end
+
+-- Focus range and blur slope from the artist-facing settings: the image is sharp within
+-- (2 * mid - max) of the focus distance, reaches half the maximum blur radius at `mid`
+-- and the full radius at `max`.
+local function get_dof_focus_range(tuning)
+	return math.max(tuning.DOF_MID_BLUR_DISTANCE * 2.0 - tuning.DOF_MAX_BLUR_DISTANCE, 0.0)
+end
+
+local function get_dof_blur_strength(tuning)
+	local slope_distance = math.max(tuning.DOF_MAX_BLUR_DISTANCE - tuning.DOF_MID_BLUR_DISTANCE, 0.0001)
+	return (0.5 * tuning.DOF_MAX_BLUR_RADIUS_PX) / slope_distance
+end
+
+local function update_matrices(self)
+	self.aspect = self.width / self.height
+	self.tan_half_fov = math.tan(self.fov * 0.5)
+	self.view = vmath.matrix4_look_at(self.camera_position, self.camera_position + self.camera_forward, self.camera_up)
+	self.projection = vmath.matrix4_perspective(self.fov, self.aspect, consts.CAMERA_NEAR, consts.CAMERA_FAR)
+end
+
+local function update_scene_constants(self)
+	local tuning = self.tuning
+	local c = self.constants
+	local palette = consts.ROOM_COLORS
+	local room_half_extent = consts.ROOM_SIZE * 0.5
+	local light = consts.WINDOW_LIGHT_COLOR
+
+	c.camera_position = vmath.vector4(self.camera_position.x, self.camera_position.y, self.camera_position.z, 1.0)
+	c.camera_forward = vmath.vector4(self.camera_forward.x, self.camera_forward.y, self.camera_forward.z, 0.0)
+	c.camera_right = vmath.vector4(self.camera_right.x, self.camera_right.y, self.camera_right.z, 0.0)
+	c.camera_up = vmath.vector4(self.camera_up.x, self.camera_up.y, self.camera_up.z, 0.0)
+	c.camera_settings = vmath.vector4(self.tan_half_fov, self.aspect, 0.0, 0.0)
+	c.camera_clip = vmath.vector4(consts.CAMERA_NEAR, consts.CAMERA_FAR, 0.0, 0.0)
+	c.room_bounds = vmath.vector4(room_half_extent, room_half_extent, room_half_extent, 1.0)
+	c.room_tint_neg_x = palette.neg_x
+	c.room_tint_pos_x = palette.pos_x
+	c.room_tint_neg_z = palette.neg_z
+	c.room_tint_pos_z = palette.pos_z
+	c.room_tint_floor = palette.floor
+	c.room_surface_settings = vmath.vector4(tuning.ROOM_WALL_ALBEDO, tuning.ROOM_FLOOR_ALBEDO, tuning.ROOM_CEILING_ALBEDO, tuning.WINDOW_LIGHT_SIZE)
+	c.window_light_color = vmath.vector4(light.x, light.y, light.z, tuning.WINDOW_LIGHT_INTENSITY)
+	c.gem_toggles = vmath.vector4(consts.GEM_REFLECTION_ENABLED and 1.0 or 0.0, consts.GEM_TRANSMISSION_ENABLED and 1.0 or 0.0, 0.0, 0.0)
+	c.gem_optics = vmath.vector4(consts.GEM_TRANSMITTANCE_IN_HUE, consts.GEM_TRANSMITTANCE_OFF_HUE, 0.0, consts.GEM_IOR)
+	c.gem_absorption = vmath.vector4(tuning.GEM_NEUTRAL_ABSORPTION, tuning.GEM_THICKNESS_BIAS, tuning.GEM_COLOR_DENSITY, 0.0)
+	c.gem_trace_settings = vmath.vector4(consts.GEM_FACET_MAX_BOUNCES, consts.GEM_DISPERSION, consts.GEM_TRAPPED_LIGHT_ESCAPE, 0.0)
+end
+
+local function matrices_differ(a, b)
+	local eps = 1e-6
+	return vmath.length(a.c0 - b.c0) > eps or vmath.length(a.c1 - b.c1) > eps
+		or vmath.length(a.c2 - b.c2) > eps or vmath.length(a.c3 - b.c3) > eps
+end
+
+local function update_dof_constants(self)
+	local c = self.dof_constants
+	local focus_distance = consts.DOF_FOCUS_DISTANCE > 0.0 and consts.DOF_FOCUS_DISTANCE or self.autofocus_distance
+	local sample_count = self.dof_temporal and consts.DOF_TEMPORAL_SAMPLE_COUNT or consts.DOF_SAMPLE_COUNT
+	local tuning = self.tuning
+	local dilation = math.ceil(tuning.DOF_MAX_BLUR_RADIUS_PX / DOF_TILE_SIZE)
+
+	c.u_full_texel = vmath.vector4(1.0 / self.width, 1.0 / self.height, self.width, self.height)
+	c.u_dof_focus = vmath.vector4(focus_distance, get_dof_focus_range(tuning), get_dof_blur_strength(tuning), tuning.DOF_MAX_BLUR_RADIUS_PX)
+	c.u_dof_sampling = vmath.vector4(self.frame_index, sample_count, 0.0, 0.0)
+	c.u_tonemap = vmath.vector4(self.tuning.SCENE_EXPOSURE, 0.0, 0.0, 0.0)
+	c.u_camera_clip = vmath.vector4(consts.CAMERA_NEAR, consts.CAMERA_FAR, 0.0, 0.0)
+	c.u_inv_proj = vmath.inv(self.projection)
+	c.u_dof_tiles = vmath.vector4(DOF_TILE_SIZE, dilation, 0.0, 0.0)
+
+	-- Temporal accumulation: has the camera moved since the last frame (history needs
+	-- reprojection), and has the image changed at all (camera, focus or a slider; history is
+	-- then clamped and kept short)?
+	local view_proj = self.projection * self.view
+	local camera_moved = self.prev_view_proj == nil or matrices_differ(view_proj, self.prev_view_proj)
+	local focus_moved = self.prev_focus_distance == nil or math.abs(focus_distance - self.prev_focus_distance) > 1e-6
+	local image_changed = camera_moved or focus_moved or self.tuning_changed
+
+	c.u_temporal = vmath.vector4(
+		self.dof_temporal and 1.0 or 0.0,
+		image_changed and 1.0 or 0.0,
+		camera_moved and 1.0 or 0.0,
+		consts.DOF_TEMPORAL_CLAMP_GAMMA
+	)
+	c.u_temporal_limits = vmath.vector4(consts.DOF_TEMPORAL_MAX_FRAMES, consts.DOF_TEMPORAL_MAX_FRAMES_MOVING, 0.0, 0.0)
+	c.u_reproj = (self.prev_view_proj or view_proj) * vmath.inv(self.view)
+
+	self.prev_view_proj = view_proj
+	self.prev_focus_distance = focus_distance
+	self.tuning_changed = false
+end
+
+-- Draws the fullscreen quad with `material_name` into `target`. The quad covers every pixel
+-- with blending off, so no clear is needed.
+local function run_fullscreen_pass(self, material_name, target, width, height, textures)
+	render.set_render_target(target)
+	render.set_viewport(0, 0, width, height)
+	render.set_view(self.identity)
+	render.set_projection(self.fullscreen_projection)
+	render.disable_state(graphics.STATE_DEPTH_TEST)
+	render.disable_state(graphics.STATE_CULL_FACE)
+	render.disable_state(graphics.STATE_BLEND)
+	render.set_depth_mask(false)
+
+	for i = 1, #textures do
+		local texture = textures[i]
+		render.enable_texture(texture.sampler, texture.target, texture.buffer or BUFFER_COLOR0_BIT)
+	end
+
+	render.enable_material(material_name)
+	render.draw(self.post_pred, { constants = self.dof_constants, sort_order = render.SORT_NONE })
+	render.disable_material()
+
+	for i = 1, #textures do
+		render.disable_texture(textures[i].sampler)
+	end
+end
+
+local function draw_scene(self)
+	render.set_render_target(self.rt_scene)
+	render.set_viewport(0, 0, self.width, self.height)
+	render.clear(self.scene_clear_buffers)
+	render.disable_state(graphics.STATE_BLEND)
+	render.set_depth_mask(true)
+
+	-- The room covers the screen and writes its own depth, so it is drawn with depth test "always".
+	render.set_view(self.identity)
+	render.set_projection(self.fullscreen_projection)
+	render.enable_state(graphics.STATE_DEPTH_TEST)
+	render.disable_state(graphics.STATE_CULL_FACE)
+	render.set_depth_func(graphics.COMPARE_FUNC_ALWAYS)
+	render.draw(self.room_pred, { constants = self.constants, sort_order = render.SORT_NONE })
+
+	render.set_view(self.view)
+	render.set_projection(self.projection)
+	render.enable_state(graphics.STATE_CULL_FACE)
+	render.set_cull_face(graphics.FACE_TYPE_BACK)
+	render.set_depth_func(graphics.COMPARE_FUNC_LESS)
+	render.draw(self.gem_pred, { constants = self.constants, sort_order = render.SORT_FRONT_TO_BACK })
+end
+
+local function draw_depth_of_field(self)
+	local default = render.RENDER_TARGET_DEFAULT
+
+	if not self.dof_fast then
+		run_fullscreen_pass(self, "dof_present", default, self.width, self.height, {
+			{ sampler = "u_scene_sampler", target = self.rt_scene, buffer = BUFFER_COLOR0_BIT },
+			{ sampler = "u_depth_sampler", target = self.rt_scene, buffer = BUFFER_DEPTH_BIT },
+		})
+		return
+	end
+
+	run_fullscreen_pass(self, "dof_prepare", self.rt_dof_source, self.width, self.height, {
+		{ sampler = "u_scene_sampler", target = self.rt_scene, buffer = BUFFER_COLOR0_BIT },
+		{ sampler = "u_depth_sampler", target = self.rt_scene, buffer = BUFFER_DEPTH_BIT },
+	})
+	run_fullscreen_pass(self, "dof_tile_max", self.rt_dof_tiles, self.tile_width, self.tile_height, {
+		{ sampler = "u_source_sampler", target = self.rt_dof_source },
+	})
+	run_fullscreen_pass(self, "dof_tile_dilate", self.rt_dof_tiles_dilated, self.tile_width, self.tile_height, {
+		{ sampler = "u_tiles_sampler", target = self.rt_dof_tiles },
+	})
+
+	local gather_textures = {
+		{ sampler = "u_source_sampler", target = self.rt_dof_source },
+		{ sampler = "u_tiles_sampler", target = self.rt_dof_tiles_dilated },
+	}
+
+	if not self.dof_temporal then
+		run_fullscreen_pass(self, "dof_gather", default, self.width, self.height, gather_textures)
+		return
+	end
+
+	local history_read = self.rt_dof_history[self.history_read]
+	local history_write = self.rt_dof_history[3 - self.history_read]
+
+	if self.history_reset then
+		for i = 1, 2 do
+			render.set_render_target(self.rt_dof_history[i])
+			render.clear({ [BUFFER_COLOR0_BIT] = CLEAR_COLOR })
+		end
+		self.history_reset = false
+	end
+
+	run_fullscreen_pass(self, "dof_gather", self.rt_dof_current, self.width, self.height, gather_textures)
+	run_fullscreen_pass(self, "dof_temporal", history_write, self.width, self.height, {
+		{ sampler = "u_current_sampler", target = self.rt_dof_current },
+		{ sampler = "u_history_sampler", target = history_read },
+		{ sampler = "u_source_sampler", target = self.rt_dof_source },
+	})
+	run_fullscreen_pass(self, "dof_tonemap", default, self.width, self.height, {
+		{ sampler = "u_history_sampler", target = history_write },
+	})
+
+	self.history_read = 3 - self.history_read
+end
+
+local function draw_gui(self)
+	render.set_render_target(render.RENDER_TARGET_DEFAULT)
+	render.set_viewport(0, 0, self.width, self.height)
+	render.set_view(self.identity)
+	render.set_projection(vmath.matrix4_orthographic(0, self.width, 0, self.height, -1.0, 1.0))
+	render.disable_state(graphics.STATE_DEPTH_TEST)
+	render.disable_state(graphics.STATE_CULL_FACE)
+	render.enable_state(graphics.STATE_BLEND)
+	render.set_blend_func(graphics.BLEND_FACTOR_SRC_ALPHA, graphics.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
+	render.set_depth_mask(false)
+	-- Default sorting: GUI nodes carry their draw order in the sort key. Without it text
+	-- batches can be drawn before the boxes behind them.
+	render.draw(self.gui_pred)
+	render.disable_state(graphics.STATE_BLEND)
+end
+
+function init(self)
+	self.room_pred = render.predicate({ hash("room") })
+	self.post_pred = render.predicate({ hash("post") })
+	self.gem_pred = render.predicate({ hash("gem") })
+	self.gui_pred = render.predicate({ hash("gui") })
+
+	self.constants = render.constant_buffer()
+	self.dof_constants = render.constant_buffer()
+	self.scene_clear_buffers = {
+		[BUFFER_COLOR0_BIT] = CLEAR_COLOR,
+		[BUFFER_DEPTH_BIT] = 1,
+	}
+	self.identity = vmath.matrix4()
+	self.fullscreen_projection = vmath.matrix4_orthographic(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+
+	-- Current values of the settings exposed as debug sliders.
+	self.tuning = {}
+	for _, slider in ipairs(consts.DEBUG_SLIDERS) do
+		self.tuning[slider.key] = consts[slider.key]
+	end
+	self.tuning_changed = false
+
+	-- Until main/app.script sends the first camera message.
+	self.camera_position = vmath.vector3(0.0, 0.0, consts.CAMERA_ORBIT_RADIUS)
+	self.camera_forward = vmath.vector3(0.0, 0.0, -1.0)
+	self.camera_right = vmath.vector3(1.0, 0.0, 0.0)
+	self.camera_up = vmath.vector3(0.0, 1.0, 0.0)
+	self.fov = consts.CAMERA_FOV
+	self.autofocus_distance = consts.CAMERA_ORBIT_RADIUS
+	self.frame_index = 0
+
+	set_size(self, math.max(render.get_window_width(), 1), math.max(render.get_window_height(), 1))
+	create_render_targets(self)
+end
+
+function update(self)
+	local width = math.max(render.get_window_width(), 1)
+	local height = math.max(render.get_window_height(), 1)
+	if width ~= self.width or height ~= self.height then
+		resize_render_targets(self, width, height)
+	end
+
+	update_matrices(self)
+	update_scene_constants(self)
+	update_dof_constants(self)
+
+	draw_scene(self)
+	draw_depth_of_field(self)
+	draw_gui(self)
+
+	self.frame_index = (self.frame_index + 1) % FRAME_INDEX_PERIOD
+end
+
+function on_message(self, message_id, message)
+	if message_id == MSG_SET_ROOM_CAMERA then
+		self.camera_position = message.position
+		self.camera_forward = message.forward
+		self.camera_right = message.right
+		self.camera_up = message.up
+		self.fov = message.fov
+		self.autofocus_distance = message.focus_distance
+	elseif message_id == MSG_SET_DEBUG_TUNING then
+		if self.tuning[message.key] ~= nil then
+			self.tuning[message.key] = message.value
+			self.tuning_changed = true
+		end
+	end
+end

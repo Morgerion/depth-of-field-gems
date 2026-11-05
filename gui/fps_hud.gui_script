@@ -1,0 +1,197 @@
+-- FPS counter and a collapsible settings panel with the sliders listed in
+-- consts.DEBUG_SLIDERS. The panel starts collapsed behind an "Expand settings" button.
+-- Slider values are sent to the render script; config/consts.lua holds the initial values.
+-- main/app.script gives this GUI input focus above the camera, so clicks on the controls
+-- never reach the camera orbit.
+
+local consts = require("config.consts")
+
+local H_TOUCH = hash("touch")
+local MSG_SET_DEBUG_TUNING = hash("set_debug_tuning")
+local RENDER_URL = "@render:"
+
+local ID_SLIDER_ROOT = hash("slider_root")
+local ID_SLIDER_LABEL = hash("slider_label")
+local ID_SLIDER_TRACK = hash("slider_track")
+local ID_SLIDER_HANDLE = hash("slider_handle")
+
+-- Layout of the settings panel, in GUI units.
+local PANEL_PADDING = 12
+local SLIDER_SPACING = 38
+local COLLAPSE_BUTTON_GAP = 8
+
+local LABEL_COLOR = vmath.vector4(0.92, 0.92, 0.92, 1.0)
+local LABEL_ACTIVE_COLOR = vmath.vector4(1.0, 1.0, 1.0, 1.0)
+local TRACK_COLOR = vmath.vector4(0.3, 0.3, 0.32, 0.9)
+local TRACK_ACTIVE_COLOR = vmath.vector4(0.45, 0.45, 0.48, 1.0)
+local HANDLE_COLOR = vmath.vector4(0.96, 0.96, 0.96, 1.0)
+local HANDLE_ACTIVE_COLOR = vmath.vector4(1.0, 1.0, 1.0, 1.0)
+
+local function clamp(value, min_value, max_value)
+  return math.min(math.max(value, min_value), max_value)
+end
+
+local function format_value(value)
+  local text = string.format("%.4f", value)
+  text = string.gsub(text, "0+$", "")
+  return (string.gsub(text, "%.$", ""))
+end
+
+local function is_hit(node, x, y)
+  return gui.is_enabled(node, true) and gui.pick_node(node, x, y)
+end
+
+local function set_control_active(control, is_active)
+  gui.set_color(control.label, is_active and LABEL_ACTIVE_COLOR or LABEL_COLOR)
+  gui.set_color(control.track, is_active and TRACK_ACTIVE_COLOR or TRACK_COLOR)
+  gui.set_color(control.handle, is_active and HANDLE_ACTIVE_COLOR or HANDLE_COLOR)
+end
+
+-- Horizontal range of the handle center along the track, in the slider's local space.
+local function get_handle_range(control)
+  local track_x = gui.get_position(control.track).x
+  local track_width = gui.get_size(control.track).x
+  local handle_half = gui.get_size(control.handle).x * 0.5
+  return track_x + handle_half, track_x + track_width - handle_half
+end
+
+local function refresh_control(control)
+  local left, right = get_handle_range(control)
+  local t = (control.value - control.min) / (control.max - control.min)
+  local handle_position = gui.get_position(control.handle)
+  handle_position.x = left + (right - left) * t
+  gui.set_position(control.handle, handle_position)
+  gui.set_text(control.label, string.format("M.%s = %s", control.key, format_value(control.value)))
+end
+
+local function set_control_from_screen(control, screen_x, screen_y)
+  local left, right = get_handle_range(control)
+  local local_x = gui.screen_to_local(control.handle, vmath.vector3(screen_x, screen_y, 0.0)).x
+  local t = clamp((local_x - left) / (right - left), 0.0, 1.0)
+  control.value = control.min + (control.max - control.min) * t
+  refresh_control(control)
+  msg.post(RENDER_URL, MSG_SET_DEBUG_TUNING, { key = control.key, value = control.value })
+end
+
+local function make_control(def, nodes)
+  local control = {
+    key = def.key,
+    min = def.min,
+    max = def.max,
+    value = clamp(consts[def.key], def.min, def.max),
+    label = nodes[ID_SLIDER_LABEL],
+    track = nodes[ID_SLIDER_TRACK],
+    handle = nodes[ID_SLIDER_HANDLE],
+  }
+  set_control_active(control, false)
+  refresh_control(control)
+  return control
+end
+
+local function find_control_at(self, x, y)
+  for _, control in ipairs(self.controls) do
+    if is_hit(control.handle, x, y) or is_hit(control.track, x, y) then
+      return control
+    end
+  end
+  return nil
+end
+
+local function set_expanded(self, expanded)
+  gui.set_enabled(self.panel, expanded)
+  gui.set_enabled(self.expand_button, not expanded)
+end
+
+-- The template slider in the scene becomes the first one; the others are clones of it,
+-- stacked below inside the panel. The collapse button goes under the last slider and the
+-- panel is sized to fit.
+local function build_sliders(self)
+  local template = gui.get_node("slider_root")
+  local template_nodes = {
+    [ID_SLIDER_ROOT] = template,
+    [ID_SLIDER_LABEL] = gui.get_node("slider_label"),
+    [ID_SLIDER_TRACK] = gui.get_node("slider_track"),
+    [ID_SLIDER_HANDLE] = gui.get_node("slider_handle"),
+  }
+
+  self.controls = {}
+  for i, def in ipairs(consts.DEBUG_SLIDERS) do
+    local nodes = i == 1 and template_nodes or gui.clone_tree(template)
+    local y = -PANEL_PADDING - (i - 1) * SLIDER_SPACING
+    gui.set_position(nodes[ID_SLIDER_ROOT], vmath.vector3(PANEL_PADDING, y, 0.0))
+    self.controls[i] = make_control(def, nodes)
+  end
+
+  local collapse_y = -PANEL_PADDING - #consts.DEBUG_SLIDERS * SLIDER_SPACING - COLLAPSE_BUTTON_GAP
+  gui.set_position(self.collapse_button, vmath.vector3(PANEL_PADDING, collapse_y, 0.0))
+
+  local panel_size = gui.get_size(self.panel)
+  panel_size.y = -collapse_y + gui.get_size(self.collapse_button).y + PANEL_PADDING
+  gui.set_size(self.panel, panel_size)
+end
+
+function init(self)
+  self.accumulated_time = 0
+  self.frame_count = 0
+  self.active_control = nil
+  self.fps_node = gui.get_node("fps_text")
+  self.expand_button = gui.get_node("expand_button")
+  self.collapse_button = gui.get_node("collapse_button")
+  self.panel = gui.get_node("settings_panel")
+  gui.set_text(self.fps_node, "FPS: --")
+
+  build_sliders(self)
+  set_expanded(self, false)
+end
+
+function update(self, dt)
+  self.accumulated_time = self.accumulated_time + dt
+  self.frame_count = self.frame_count + 1
+
+  if self.accumulated_time >= consts.FPS_UPDATE_INTERVAL then
+    local fps = self.frame_count / self.accumulated_time
+    gui.set_text(self.fps_node, string.format("FPS: %d", math.floor(fps + 0.5)))
+    self.accumulated_time = 0
+    self.frame_count = 0
+  end
+end
+
+function on_input(self, action_id, action)
+  if action_id ~= H_TOUCH then
+    return false
+  end
+
+  if action.pressed then
+    if is_hit(self.expand_button, action.x, action.y) then
+      set_expanded(self, true)
+      return true
+    end
+    if is_hit(self.collapse_button, action.x, action.y) then
+      set_expanded(self, false)
+      return true
+    end
+
+    local control = find_control_at(self, action.x, action.y)
+    if not control then
+      -- Clicks on the panel background are swallowed; everything else orbits the camera.
+      return is_hit(self.panel, action.x, action.y)
+    end
+    self.active_control = control
+    set_control_active(control, true)
+    set_control_from_screen(control, action.screen_x, action.screen_y)
+    return true
+  end
+
+  local control = self.active_control
+  if not control then
+    return false
+  end
+
+  if action.released then
+    set_control_active(control, false)
+    self.active_control = nil
+  else
+    set_control_from_screen(control, action.screen_x, action.screen_y)
+  end
+  return true
+end

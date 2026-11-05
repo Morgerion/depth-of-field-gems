@@ -1,0 +1,51 @@
+#version 140
+
+uniform vx_uniforms {
+  mat4 mtx_world;
+  mat4 view_proj;
+};
+
+in vec4 position;
+in vec3 normal;
+
+out vec3 var_world_normal;
+out vec3 var_world_position;
+out vec3 var_world_center;
+out vec3 var_local_position;
+// Columns of the 3x3 part of mtx_world and of its inverse: identical at all vertices,
+// so interpolation does not corrupt them. The fragment shader needs them to
+// trace in the gem's local coordinates, where the facet planes are defined.
+out vec3 var_world_basis_x;
+out vec3 var_world_basis_y;
+out vec3 var_world_basis_z;
+out vec3 var_local_basis_x;
+out vec3 var_local_basis_y;
+out vec3 var_local_basis_z;
+
+// Defold's shader pipeline rejects inverse(), so the 3x3 inverse is built from cross products.
+mat3 inverse_mat3(mat3 m) {
+  vec3 r0 = cross(m[1], m[2]);
+  vec3 r1 = cross(m[2], m[0]);
+  vec3 r2 = cross(m[0], m[1]);
+  float inv_det = 1.0 / dot(m[0], r0);
+  return transpose(mat3(r0, r1, r2)) * inv_det;
+}
+
+void main() {
+  vec4 world_position = mtx_world * vec4(position.xyz, 1.0);
+  vec4 world_center = mtx_world * vec4(0.0, 0.0, 0.0, 1.0);
+  mat3 to_world = mat3(mtx_world);
+  mat3 to_local = inverse_mat3(to_world);
+
+  gl_Position = view_proj * world_position;
+  var_world_position = world_position.xyz;
+  var_world_center = world_center.xyz;
+  var_world_normal = normalize(to_world * normal);
+  var_local_position = position.xyz;
+  var_world_basis_x = to_world[0];
+  var_world_basis_y = to_world[1];
+  var_world_basis_z = to_world[2];
+  var_local_basis_x = to_local[0];
+  var_local_basis_y = to_local[1];
+  var_local_basis_z = to_local[2];
+}

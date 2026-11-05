@@ -1,0 +1,95 @@
+name: "dof_tonemap"
+tags: "post"
+vertex_program: "/shaders/fullscreen.vp"
+fragment_program: "/shaders/dof_tonemap.fp"
+vertex_space: VERTEX_SPACE_WORLD
+vertex_constants {
+  name: "view_proj"
+  type: CONSTANT_TYPE_VIEWPROJ
+}
+fragment_constants {
+  name: "u_full_texel"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.00078125
+    y: 0.0013888889
+    z: 1280.0
+    w: 720.0
+  }
+}
+fragment_constants {
+  name: "u_dof_focus"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.4
+    z: 40.0
+    w: 16.0
+  }
+}
+fragment_constants {
+  name: "u_dof_sampling"
+  type: CONSTANT_TYPE_USER
+  value {
+    y: 48.0
+  }
+}
+fragment_constants {
+  name: "u_tonemap"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.4359
+  }
+}
+fragment_constants {
+  name: "u_camera_clip"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.01
+    y: 4.0
+  }
+}
+fragment_constants {
+  name: "u_inv_proj"
+  type: CONSTANT_TYPE_USER_MATRIX4
+  value {
+    x: 1.0
+  }
+}
+fragment_constants {
+  name: "u_dof_tiles"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 16.0
+    y: 1.0
+  }
+}
+fragment_constants {
+  name: "u_temporal"
+  type: CONSTANT_TYPE_USER
+  value {
+    w: 1.25
+  }
+}
+fragment_constants {
+  name: "u_temporal_limits"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 32.0
+    y: 8.0
+  }
+}
+fragment_constants {
+  name: "u_reproj"
+  type: CONSTANT_TYPE_USER_MATRIX4
+  value {
+    x: 1.0
+  }
+}
+samplers {
+  name: "u_history_sampler"
+  wrap_u: WRAP_MODE_CLAMP_TO_EDGE
+  wrap_v: WRAP_MODE_CLAMP_TO_EDGE
+  filter_min: FILTER_MODE_MIN_NEAREST
+  filter_mag: FILTER_MODE_MAG_NEAREST
+}
+max_page_count: 0

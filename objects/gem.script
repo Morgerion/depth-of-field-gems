@@ -1,0 +1,45 @@
+-- One gem: on "setup" (sent by main/app.script) builds the mesh buffer of its cut and uploads
+-- the per-gem material constants, including the facet planes traced by shaders/gem.fp.
+
+local gem_buffers = require("geometry.gem_buffers")
+local gem_planes = require("geometry.gems.planes")
+
+local MSG_SETUP = hash("setup")
+
+local resource_counter = 0
+
+local function release_resource(self)
+  if self.vertices_resource then
+    resource.release(self.vertices_resource)
+    self.vertices_resource = nil
+  end
+end
+
+function final(self)
+  release_resource(self)
+end
+
+function on_message(self, message_id, message)
+  if message_id ~= MSG_SETUP then
+    return
+  end
+
+  release_resource(self)
+
+  resource_counter = resource_counter + 1
+  local runtime_path = string.format("/runtime_gems/%s_%04d.bufferc", message.id, resource_counter)
+  self.vertices_resource = resource.create_buffer(runtime_path, {
+    buffer = gem_buffers.create(message.buffer),
+    transfer_ownership = true,
+  })
+  go.set("#mesh", "vertices", self.vertices_resource)
+
+  local planes = assert(gem_planes[message.id], "No facet planes for gem: " .. tostring(message.id))
+  for i = 1, #planes do
+    local p = planes[i]
+    go.set("#mesh", "gem_planes", vmath.vector4(p[1], p[2], p[3], p[4]), { index = i })
+  end
+
+  go.set("#mesh", "gem_color", message.color)
+  go.set("#mesh", "gem_shape", vmath.vector4(message.radius, #planes, 0.0, 0.0))
+end

@@ -1,0 +1,136 @@
+name: "room"
+tags: "room"
+tags: "post"
+vertex_program: "/shaders/fullscreen.vp"
+fragment_program: "/shaders/room.fp"
+vertex_space: VERTEX_SPACE_WORLD
+vertex_constants {
+  name: "view_proj"
+  type: CONSTANT_TYPE_VIEWPROJ
+}
+fragment_constants {
+  name: "camera_position"
+  type: CONSTANT_TYPE_USER
+  value {
+    z: 0.485
+    w: 1.0
+  }
+}
+fragment_constants {
+  name: "camera_forward"
+  type: CONSTANT_TYPE_USER
+  value {
+    z: -1.0
+  }
+}
+fragment_constants {
+  name: "camera_right"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 1.0
+  }
+}
+fragment_constants {
+  name: "camera_up"
+  type: CONSTANT_TYPE_USER
+  value {
+    y: 1.0
+  }
+}
+fragment_constants {
+  name: "camera_settings"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.57735026
+    y: 1.7777778
+  }
+}
+fragment_constants {
+  name: "camera_clip"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.01
+    y: 4.0
+  }
+}
+fragment_constants {
+  name: "room_bounds"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.5
+    y: 0.5
+    z: 0.5
+    w: 1.0
+  }
+}
+fragment_constants {
+  name: "room_tint_neg_x"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.36
+    y: 0.22
+    z: 0.18
+    w: 1.0
+  }
+}
+fragment_constants {
+  name: "room_tint_pos_x"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.31
+    y: 0.56
+    z: 0.43
+    w: 1.0
+  }
+}
+fragment_constants {
+  name: "room_tint_neg_z"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.57
+    y: 0.46
+    z: 0.31
+    w: 1.0
+  }
+}
+fragment_constants {
+  name: "room_tint_pos_z"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.43
+    y: 0.31
+    z: 0.57
+    w: 1.0
+  }
+}
+fragment_constants {
+  name: "room_tint_floor"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.9
+    y: 0.8
+    z: 0.8
+    w: 1.0
+  }
+}
+fragment_constants {
+  name: "room_surface_settings"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 0.2371
+    y: 0.1879
+    z: 0.6183
+    w: 0.5558
+  }
+}
+fragment_constants {
+  name: "window_light_color"
+  type: CONSTANT_TYPE_USER
+  value {
+    x: 1.0
+    y: 1.0
+    z: 1.0
+    w: 10.0
+  }
+}
+max_page_count: 0

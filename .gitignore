@@ -1,0 +1,20 @@
+/.internal
+/build
+.externalToolBuilders
+.DS_Store
+Thumbs.db
+.lock-wscript
+*.pyc
+.project
+.cproject
+builtins
+/.editor_settings
+log.txt
+imgui.ini
+
+# Defold liveupdate manifest signing keys (generated locally, never publish the private one)
+manifest.private.der
+manifest.public.der
+# local scratch files and rendered videos
+/__sample
+/media

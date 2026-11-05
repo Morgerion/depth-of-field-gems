@@ -1,0 +1,29 @@
+script: "/render/gem_room.render_script"
+render_resources {
+  name: "dof_present"
+  path: "/materials/dof_present.material"
+}
+render_resources {
+  name: "dof_prepare"
+  path: "/materials/dof_prepare.material"
+}
+render_resources {
+  name: "dof_tile_max"
+  path: "/materials/dof_tile_max.material"
+}
+render_resources {
+  name: "dof_tile_dilate"
+  path: "/materials/dof_tile_dilate.material"
+}
+render_resources {
+  name: "dof_gather"
+  path: "/materials/dof_gather.material"
+}
+render_resources {
+  name: "dof_temporal"
+  path: "/materials/dof_temporal.material"
+}
+render_resources {
+  name: "dof_tonemap"
+  path: "/materials/dof_tonemap.material"
+}
