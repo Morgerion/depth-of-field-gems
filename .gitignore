@@ -18,3 +18,4 @@ manifest.public.der
 # local scratch files and rendered videos
 /__sample
 /media
+/web_build

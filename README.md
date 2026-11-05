@@ -124,9 +124,10 @@ Everything is computed in shaders every frame, with no scene textures and no bak
 3. Drag with the mouse to orbit the camera. **Expand settings** under the FPS counter opens
    sliders for the blur, the lighting and the gem absorption.
 
-The project has no dependencies and no native extensions. It also builds for the web
-(`bob --platform wasm-web`); see [ENGINE.md](ENGINE.md) for the shader constraints this
-imposes. The web build compiles but has not been tested in a browser yet.
+The project has no dependencies and no native extensions. It also runs in the browser: bundle it
+with **Project → Bundle → HTML5** (or `bob --platform wasm-web`). The web build was tested in a
+Chromium-based browser with WebGL2. Because Defold also compiles every shader for WebGL1, the
+shaders avoid `textureSize`, `texelFetch` and `inverse()`.
 
 If the device cannot render to RGBA16F, the renderer falls back to the original single-pass DoF
 automatically and logs which path it uses.
@@ -160,8 +161,6 @@ main/app.script                 camera orbit, autofocus, gem spawning
 objects/                        gem game object and the cluster layout
 geometry/gems/                  gem meshes (.buffer) and facet planes (planes.lua)
 tools/                          gem extraction from glTF and facet plane generation
-plan.md                         original design document of the demo
-ENGINE.md                       notes on the Defold 1.14.0 port and shader constraints
 ```
 
 ## Credits

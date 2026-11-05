@@ -16,7 +16,7 @@ local BUFFER_COLOR0_BIT = graphics.BUFFER_TYPE_COLOR0_BIT
 local BUFFER_DEPTH_BIT = graphics.BUFFER_TYPE_DEPTH_BIT
 
 -- Defold 1.14.0 removed render.FORMAT_* / render.FILTER_* / render.WRAP_* (now nil),
--- so graphics.TEXTURE_* is used; the old names are kept as a fallback for 1.12.x. See ENGINE.md.
+-- so graphics.TEXTURE_* is used; the old names are kept as a fallback for 1.12.x.
 local FORMAT_RGBA = graphics.TEXTURE_FORMAT_RGBA or render.FORMAT_RGBA
 local FORMAT_DEPTH = graphics.TEXTURE_FORMAT_DEPTH or render.FORMAT_DEPTH
 local FILTER_NEAREST = graphics.TEXTURE_FILTER_NEAREST or render.FILTER_NEAREST
@@ -62,18 +62,22 @@ local function delete_render_targets(targets)
 	end
 end
 
+-- Creates every render target at the current size and remembers them in self.render_targets.
+-- Called again on every window resize (see update): resizing RGBA16F targets in place leaves
+-- them unusable on WebGL, so they are always recreated instead.
 local function create_render_targets(self)
 	local width, height = self.width, self.height
+	self.render_targets = {}
 	self.rt_scene = render.render_target("rt_scene", {
 		[BUFFER_COLOR0_BIT] = create_target_params(FORMAT_RGBA, width, height, FILTER_NEAREST),
 		[BUFFER_DEPTH_BIT] = create_target_params(FORMAT_DEPTH, width, height, FILTER_NEAREST, render.TEXTURE_BIT),
 	})
+	self.render_targets[1] = self.rt_scene
 
 	self.dof_fast = false
 	self.dof_temporal = false
 	if not consts.DOF_FAST_PATH or not FORMAT_RGBA16F then
-		print("DoF: original single pass (dof_present)")
-		return
+		return "DoF: original single pass (dof_present)"
 	end
 
 	local created = {}
@@ -99,15 +103,17 @@ local function create_render_targets(self)
 
 	if not ok then
 		delete_render_targets(created)
-		print("DoF: RGBA16F render targets failed, using the original single pass: " .. tostring(err))
-		return
+		return "DoF: RGBA16F render targets failed, using the original single pass: " .. tostring(err)
 	end
 
+	for _, target in ipairs(created) do
+		self.render_targets[#self.render_targets + 1] = target
+	end
 	self.dof_fast = true
 	self.dof_temporal = consts.DOF_TEMPORAL
 	self.history_read = 1
 	self.history_reset = true
-	print(self.dof_temporal and "DoF: fast path with temporal accumulation" or "DoF: fast path")
+	return self.dof_temporal and "DoF: fast path with temporal accumulation" or "DoF: fast path"
 end
 
 local function set_size(self, width, height)
@@ -118,20 +124,9 @@ local function set_size(self, width, height)
 end
 
 local function resize_render_targets(self, width, height)
+	delete_render_targets(self.render_targets)
 	set_size(self, width, height)
-
-	render.set_render_target_size(self.rt_scene, width, height)
-	if self.dof_fast then
-		render.set_render_target_size(self.rt_dof_source, width, height)
-		render.set_render_target_size(self.rt_dof_tiles, self.tile_width, self.tile_height)
-		render.set_render_target_size(self.rt_dof_tiles_dilated, self.tile_width, self.tile_height)
-	end
-	if self.dof_temporal then
-		render.set_render_target_size(self.rt_dof_current, width, height)
-		render.set_render_target_size(self.rt_dof_history[1], width, height)
-		render.set_render_target_size(self.rt_dof_history[2], width, height)
-		self.history_reset = true
-	end
+	create_render_targets(self)
 end
 
 -- Focus range and blur slope from the artist-facing settings: the image is sharp within
@@ -376,7 +371,7 @@ function init(self)
 	self.frame_index = 0
 
 	set_size(self, math.max(render.get_window_width(), 1), math.max(render.get_window_height(), 1))
-	create_render_targets(self)
+	print(create_render_targets(self))
 end
 
 function update(self)
