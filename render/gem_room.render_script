@@ -3,6 +3,10 @@
 --      into rt_scene (RGBM-packed HDR color + depth);
 --   2. depth of field, either the fast path
 --        dof_prepare -> dof_tile_max -> dof_tile_dilate -> dof_gather [-> dof_temporal -> dof_tonemap]
+--      with an optional half-resolution mode (switched at runtime from the settings panel)
+--        dof_prepare -> dof_downsample -> dof_tile_max -> dof_tile_dilate -> dof_gather
+--          -> dof_composite [-> dof_temporal -> dof_tonemap]
+--      where the passes from dof_downsample to dof_gather run at half resolution,
 --      or, when RGBA16F render targets are unavailable, the original single pass dof_present;
 --   3. GUI on top.
 -- The room quad (tags "room" and "post") also serves as the geometry for every fullscreen pass.
@@ -11,6 +15,7 @@ local consts = require("config.consts")
 
 local MSG_SET_ROOM_CAMERA = hash("set_room_camera")
 local MSG_SET_DEBUG_TUNING = hash("set_debug_tuning")
+local MSG_SET_DOF_HALF_RESOLUTION = hash("set_dof_half_resolution")
 
 local BUFFER_COLOR0_BIT = graphics.BUFFER_TYPE_COLOR0_BIT
 local BUFFER_DEPTH_BIT = graphics.BUFFER_TYPE_DEPTH_BIT
@@ -30,6 +35,8 @@ local FORMAT_RGBA16F = graphics.TEXTURE_FORMAT_RGBA16F
 -- tiles (must match DOF_MAX_DILATION in the shaders).
 local DOF_TILE_SIZE = 16
 local DOF_MAX_DILATION = 4
+-- Half-resolution mode: the same tiles, 16 full-resolution pixels wide.
+local DOF_HALF_TILE_SIZE = DOF_TILE_SIZE / 2
 assert(consts.DOF_MAX_BLUR_RADIUS_PX <= DOF_TILE_SIZE * DOF_MAX_DILATION,
 	"DOF_MAX_BLUR_RADIUS_PX is larger than the tile search can reach")
 -- Wraps around so that frame * golden ratio in the shaders keeps float precision.
@@ -76,6 +83,7 @@ local function create_render_targets(self)
 
 	self.dof_fast = false
 	self.dof_temporal = false
+	self.dof_half = false
 	if not consts.DOF_FAST_PATH or not FORMAT_RGBA16F then
 		return "DoF: original single pass (dof_present)"
 	end
@@ -87,10 +95,20 @@ local function create_render_targets(self)
 		return target
 	end
 
+	local half = self.dof_half_requested
 	local ok, err = pcall(function()
 		self.rt_dof_source = create("rt_dof_source", FORMAT_RGBA16F, width, height, FILTER_LINEAR)
-		self.rt_dof_tiles = create("rt_dof_tiles", FORMAT_RGBA, self.tile_width, self.tile_height, FILTER_NEAREST)
-		self.rt_dof_tiles_dilated = create("rt_dof_tiles_dilated", FORMAT_RGBA, self.tile_width, self.tile_height, FILTER_NEAREST)
+		if half then
+			-- Half-resolution scene, its tiles and the half-resolution blur.
+			local half_width, half_height = self.half_width, self.half_height
+			self.rt_dof_half_source = create("rt_dof_half_source", FORMAT_RGBA16F, half_width, half_height, FILTER_NEAREST)
+			self.rt_dof_half_blur = create("rt_dof_half_blur", FORMAT_RGBA16F, half_width, half_height, FILTER_NEAREST)
+			self.rt_dof_tiles = create("rt_dof_tiles", FORMAT_RGBA, self.half_tile_width, self.half_tile_height, FILTER_NEAREST)
+			self.rt_dof_tiles_dilated = create("rt_dof_tiles_dilated", FORMAT_RGBA, self.half_tile_width, self.half_tile_height, FILTER_NEAREST)
+		else
+			self.rt_dof_tiles = create("rt_dof_tiles", FORMAT_RGBA, self.tile_width, self.tile_height, FILTER_NEAREST)
+			self.rt_dof_tiles_dilated = create("rt_dof_tiles_dilated", FORMAT_RGBA, self.tile_width, self.tile_height, FILTER_NEAREST)
+		end
 		if consts.DOF_TEMPORAL then
 			-- The frame's gather result and two history buffers that swap roles every frame.
 			self.rt_dof_current = create("rt_dof_current", FORMAT_RGBA16F, width, height, FILTER_NEAREST)
@@ -111,9 +129,12 @@ local function create_render_targets(self)
 	end
 	self.dof_fast = true
 	self.dof_temporal = consts.DOF_TEMPORAL
+	self.dof_half = half
 	self.history_read = 1
 	self.history_reset = true
-	return self.dof_temporal and "DoF: fast path with temporal accumulation" or "DoF: fast path"
+	return "DoF: fast path"
+		.. (half and " at half resolution" or "")
+		.. (self.dof_temporal and " with temporal accumulation" or "")
 end
 
 local function set_size(self, width, height)
@@ -121,12 +142,16 @@ local function set_size(self, width, height)
 	self.height = height
 	self.tile_width = math.ceil(width / DOF_TILE_SIZE)
 	self.tile_height = math.ceil(height / DOF_TILE_SIZE)
+	self.half_width = math.ceil(width / 2)
+	self.half_height = math.ceil(height / 2)
+	self.half_tile_width = math.ceil(self.half_width / DOF_HALF_TILE_SIZE)
+	self.half_tile_height = math.ceil(self.half_height / DOF_HALF_TILE_SIZE)
 end
 
 local function resize_render_targets(self, width, height)
 	delete_render_targets(self.render_targets)
 	set_size(self, width, height)
-	create_render_targets(self)
+	self.dof_status = create_render_targets(self)
 end
 
 -- Focus range and blur slope from the artist-facing settings: the image is sharp within
@@ -181,20 +206,19 @@ local function matrices_differ(a, b)
 		or vmath.length(a.c2 - b.c2) > eps or vmath.length(a.c3 - b.c3) > eps
 end
 
-local function update_dof_constants(self)
-	local c = self.dof_constants
-	local focus_distance = consts.DOF_FOCUS_DISTANCE > 0.0 and consts.DOF_FOCUS_DISTANCE or self.autofocus_distance
-	local sample_count = self.dof_temporal and consts.DOF_TEMPORAL_SAMPLE_COUNT or consts.DOF_SAMPLE_COUNT
-	local tuning = self.tuning
-	local dilation = math.ceil(tuning.DOF_MAX_BLUR_RADIUS_PX / DOF_TILE_SIZE)
+local function get_dof_sample_count(self)
+	if not self.dof_temporal then
+		return consts.DOF_SAMPLE_COUNT
+	end
+	return self.dof_half and consts.DOF_HALF_RES_SAMPLE_COUNT or consts.DOF_TEMPORAL_SAMPLE_COUNT
+end
 
-	c.u_full_texel = vmath.vector4(1.0 / self.width, 1.0 / self.height, self.width, self.height)
-	c.u_dof_focus = vmath.vector4(focus_distance, get_dof_focus_range(tuning), get_dof_blur_strength(tuning), tuning.DOF_MAX_BLUR_RADIUS_PX)
-	c.u_dof_sampling = vmath.vector4(self.frame_index, sample_count, 0.0, 0.0)
-	c.u_tonemap = vmath.vector4(self.tuning.SCENE_EXPOSURE, 0.0, 0.0, 0.0)
-	c.u_camera_clip = vmath.vector4(consts.CAMERA_NEAR, consts.CAMERA_FAR, 0.0, 0.0)
-	c.u_inv_proj = vmath.inv(self.projection)
-	c.u_dof_tiles = vmath.vector4(DOF_TILE_SIZE, dilation, 0.0, 0.0)
+local function update_dof_constants(self)
+	local focus_distance = consts.DOF_FOCUS_DISTANCE > 0.0 and consts.DOF_FOCUS_DISTANCE or self.autofocus_distance
+	local tuning = self.tuning
+	local focus_range = get_dof_focus_range(tuning)
+	local blur_strength = get_dof_blur_strength(tuning)
+	local max_radius = tuning.DOF_MAX_BLUR_RADIUS_PX
 
 	-- Temporal accumulation: has the camera moved since the last frame (history needs
 	-- reprojection), and has the image changed at all (camera, focus or a slider; history is
@@ -204,14 +228,39 @@ local function update_dof_constants(self)
 	local focus_moved = self.prev_focus_distance == nil or math.abs(focus_distance - self.prev_focus_distance) > 1e-6
 	local image_changed = camera_moved or focus_moved or self.tuning_changed
 
-	c.u_temporal = vmath.vector4(
-		self.dof_temporal and 1.0 or 0.0,
-		image_changed and 1.0 or 0.0,
-		camera_moved and 1.0 or 0.0,
-		consts.DOF_TEMPORAL_CLAMP_GAMMA
-	)
-	c.u_temporal_limits = vmath.vector4(consts.DOF_TEMPORAL_MAX_FRAMES, consts.DOF_TEMPORAL_MAX_FRAMES_MOVING, 0.0, 0.0)
-	c.u_reproj = (self.prev_view_proj or view_proj) * vmath.inv(self.view)
+	-- Constants shared by the full- and half-resolution passes.
+	local shared = {
+		u_dof_sampling = vmath.vector4(self.frame_index, get_dof_sample_count(self), 0.0, 0.0),
+		u_tonemap = vmath.vector4(tuning.SCENE_EXPOSURE, 0.0, 0.0, 0.0),
+		u_camera_clip = vmath.vector4(consts.CAMERA_NEAR, consts.CAMERA_FAR, 0.0, 0.0),
+		u_inv_proj = vmath.inv(self.projection),
+		u_temporal = vmath.vector4(
+			self.dof_temporal and 1.0 or 0.0,
+			image_changed and 1.0 or 0.0,
+			camera_moved and 1.0 or 0.0,
+			consts.DOF_TEMPORAL_CLAMP_GAMMA
+		),
+		u_temporal_limits = vmath.vector4(consts.DOF_TEMPORAL_MAX_FRAMES, consts.DOF_TEMPORAL_MAX_FRAMES_MOVING, 0.0, 0.0),
+		u_reproj = (self.prev_view_proj or view_proj) * vmath.inv(self.view),
+	}
+
+	local c = self.dof_constants
+	for name, value in pairs(shared) do
+		c[name] = value
+	end
+	c.u_full_texel = vmath.vector4(1.0 / self.width, 1.0 / self.height, self.width, self.height)
+	c.u_dof_focus = vmath.vector4(focus_distance, focus_range, blur_strength, max_radius)
+	c.u_dof_tiles = vmath.vector4(DOF_TILE_SIZE, math.ceil(max_radius / DOF_TILE_SIZE), 0.0, 0.0)
+
+	-- The half-resolution passes measure every size in half-resolution pixels: the target, the
+	-- blur radii and the tiles. z = 1 switches dof_gather to its half-resolution mode.
+	local h = self.dof_half_constants
+	for name, value in pairs(shared) do
+		h[name] = value
+	end
+	h.u_full_texel = vmath.vector4(1.0 / self.half_width, 1.0 / self.half_height, self.half_width, self.half_height)
+	h.u_dof_focus = vmath.vector4(focus_distance, focus_range, blur_strength * 0.5, max_radius * 0.5)
+	h.u_dof_tiles = vmath.vector4(DOF_HALF_TILE_SIZE, math.ceil(max_radius * 0.5 / DOF_HALF_TILE_SIZE), 1.0, 0.0)
 
 	self.prev_view_proj = view_proj
 	self.prev_focus_distance = focus_distance
@@ -219,8 +268,8 @@ local function update_dof_constants(self)
 end
 
 -- Draws the fullscreen quad with `material_name` into `target`. The quad covers every pixel
--- with blending off, so no clear is needed.
-local function run_fullscreen_pass(self, material_name, target, width, height, textures)
+-- with blending off, so no clear is needed. `constants` defaults to the full-resolution DoF constants.
+local function run_fullscreen_pass(self, material_name, target, width, height, textures, constants)
 	render.set_render_target(target)
 	render.set_viewport(0, 0, width, height)
 	render.set_view(self.identity)
@@ -236,7 +285,7 @@ local function run_fullscreen_pass(self, material_name, target, width, height, t
 	end
 
 	render.enable_material(material_name)
-	render.draw(self.post_pred, { constants = self.dof_constants, sort_order = render.SORT_NONE })
+	render.draw(self.post_pred, { constants = constants or self.dof_constants, sort_order = render.SORT_NONE })
 	render.disable_material()
 
 	for i = 1, #textures do
@@ -267,6 +316,44 @@ local function draw_scene(self)
 	render.draw(self.gem_pred, { constants = self.constants, sort_order = render.SORT_FRONT_TO_BACK })
 end
 
+-- Tile passes and the gather at full resolution, into `target`.
+local function draw_full_resolution_blur(self, target)
+	run_fullscreen_pass(self, "dof_tile_max", self.rt_dof_tiles, self.tile_width, self.tile_height, {
+		{ sampler = "u_source_sampler", target = self.rt_dof_source },
+	})
+	run_fullscreen_pass(self, "dof_tile_dilate", self.rt_dof_tiles_dilated, self.tile_width, self.tile_height, {
+		{ sampler = "u_tiles_sampler", target = self.rt_dof_tiles },
+	})
+	run_fullscreen_pass(self, "dof_gather", target, self.width, self.height, {
+		{ sampler = "u_source_sampler", target = self.rt_dof_source },
+		{ sampler = "u_tiles_sampler", target = self.rt_dof_tiles_dilated },
+	})
+end
+
+-- Downsample, tile passes and the gather at half resolution, then the full-resolution
+-- composite into `target`.
+local function draw_half_resolution_blur(self, target)
+	local half = self.dof_half_constants
+	run_fullscreen_pass(self, "dof_downsample", self.rt_dof_half_source, self.half_width, self.half_height, {
+		{ sampler = "u_source_sampler", target = self.rt_dof_source },
+	})
+	run_fullscreen_pass(self, "dof_tile_max", self.rt_dof_tiles, self.half_tile_width, self.half_tile_height, {
+		{ sampler = "u_source_sampler", target = self.rt_dof_half_source },
+	}, half)
+	run_fullscreen_pass(self, "dof_tile_dilate", self.rt_dof_tiles_dilated, self.half_tile_width, self.half_tile_height, {
+		{ sampler = "u_tiles_sampler", target = self.rt_dof_tiles },
+	}, half)
+	run_fullscreen_pass(self, "dof_gather", self.rt_dof_half_blur, self.half_width, self.half_height, {
+		{ sampler = "u_source_sampler", target = self.rt_dof_half_source },
+		{ sampler = "u_tiles_sampler", target = self.rt_dof_tiles_dilated },
+	}, half)
+	run_fullscreen_pass(self, "dof_composite", target, self.width, self.height, {
+		{ sampler = "u_source_sampler", target = self.rt_dof_source },
+		{ sampler = "u_half_source_sampler", target = self.rt_dof_half_source },
+		{ sampler = "u_half_blur_sampler", target = self.rt_dof_half_blur },
+	})
+end
+
 local function draw_depth_of_field(self)
 	local default = render.RENDER_TARGET_DEFAULT
 
@@ -282,20 +369,10 @@ local function draw_depth_of_field(self)
 		{ sampler = "u_scene_sampler", target = self.rt_scene, buffer = BUFFER_COLOR0_BIT },
 		{ sampler = "u_depth_sampler", target = self.rt_scene, buffer = BUFFER_DEPTH_BIT },
 	})
-	run_fullscreen_pass(self, "dof_tile_max", self.rt_dof_tiles, self.tile_width, self.tile_height, {
-		{ sampler = "u_source_sampler", target = self.rt_dof_source },
-	})
-	run_fullscreen_pass(self, "dof_tile_dilate", self.rt_dof_tiles_dilated, self.tile_width, self.tile_height, {
-		{ sampler = "u_tiles_sampler", target = self.rt_dof_tiles },
-	})
 
-	local gather_textures = {
-		{ sampler = "u_source_sampler", target = self.rt_dof_source },
-		{ sampler = "u_tiles_sampler", target = self.rt_dof_tiles_dilated },
-	}
-
+	local draw_blur = self.dof_half and draw_half_resolution_blur or draw_full_resolution_blur
 	if not self.dof_temporal then
-		run_fullscreen_pass(self, "dof_gather", default, self.width, self.height, gather_textures)
+		draw_blur(self, default)
 		return
 	end
 
@@ -310,7 +387,7 @@ local function draw_depth_of_field(self)
 		self.history_reset = false
 	end
 
-	run_fullscreen_pass(self, "dof_gather", self.rt_dof_current, self.width, self.height, gather_textures)
+	draw_blur(self, self.rt_dof_current)
 	run_fullscreen_pass(self, "dof_temporal", history_write, self.width, self.height, {
 		{ sampler = "u_current_sampler", target = self.rt_dof_current },
 		{ sampler = "u_history_sampler", target = history_read },
@@ -347,6 +424,7 @@ function init(self)
 
 	self.constants = render.constant_buffer()
 	self.dof_constants = render.constant_buffer()
+	self.dof_half_constants = render.constant_buffer()
 	self.scene_clear_buffers = {
 		[BUFFER_COLOR0_BIT] = CLEAR_COLOR,
 		[BUFFER_DEPTH_BIT] = 1,
@@ -369,9 +447,11 @@ function init(self)
 	self.fov = consts.CAMERA_FOV
 	self.autofocus_distance = consts.CAMERA_ORBIT_RADIUS
 	self.frame_index = 0
+	self.dof_half_requested = consts.DOF_HALF_RESOLUTION
 
 	set_size(self, math.max(render.get_window_width(), 1), math.max(render.get_window_height(), 1))
-	print(create_render_targets(self))
+	self.dof_status = create_render_targets(self)
+	print(self.dof_status)
 end
 
 function update(self)
@@ -405,5 +485,9 @@ function on_message(self, message_id, message)
 			self.tuning[message.key] = message.value
 			self.tuning_changed = true
 		end
+	elseif message_id == MSG_SET_DOF_HALF_RESOLUTION then
+		self.dof_half_requested = message.enabled
+		resize_render_targets(self, self.width, self.height)
+		print(self.dof_status)
 	end
 end

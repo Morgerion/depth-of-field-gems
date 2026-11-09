@@ -16,8 +16,16 @@ render_resources {
   path: "/materials/dof_tile_dilate.material"
 }
 render_resources {
+  name: "dof_downsample"
+  path: "/materials/dof_downsample.material"
+}
+render_resources {
   name: "dof_gather"
   path: "/materials/dof_gather.material"
+}
+render_resources {
+  name: "dof_composite"
+  path: "/materials/dof_composite.material"
 }
 render_resources {
   name: "dof_temporal"

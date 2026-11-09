@@ -101,6 +101,55 @@ Frame times are whole-frame medians without vsync at 2560×1440 (a 1280×720 win
 display), NVIDIA GeForce RTX 5060 Ti, Defold 1.14.0, OpenGL on Windows. They include the scene
 itself, about 5 ms.
 
+## Optional: half-resolution mode
+
+Everything above keeps the result of the original pass. The half-resolution mode is the classic
+trade that most games make instead: it computes the blur on a quarter of the pixels and accepts a
+small, known loss of accuracy. It is off by default and can be switched at runtime with the
+**DoF: full resolution / half resolution** button in the settings panel, so the two can be
+compared on the same view.
+
+```
+dof_prepare      full resolution, as before
+  -> dof_downsample   2x2 -> 1: depth of the nearest pixel, box-averaged color of that surface
+  -> dof_tile_max, dof_tile_dilate, dof_gather   the same passes at half resolution
+  -> dof_composite    back to full resolution
+  -> dof_temporal, dof_tonemap                   full resolution, as before
+```
+
+- The gather is the same scatter-as-gather with five layers; only every size is measured in
+  half-resolution pixels, and each sample reads color and depth in a single fetch.
+- The box-averaged downsample keeps the energy of small bright highlights, so their bokeh disks
+  stay as bright as at full resolution.
+- `dof_composite` upsamples the blur bilaterally (by depth) wherever one side of an edge is sharp,
+  and plainly where both sides are blurred, since the true image is smooth there. In-focus pixels
+  get their full-resolution detail back: `blur + detail × (sharp − low)`, where `low` is the
+  half-resolution scene and `detail` falls from 1 in focus to 0 at 3 px of blur and is reduced
+  by the blurred foreground covering the pixel.
+
+Measured the same way as above, at the current 28 px default, against a reference of 128 samples
+per frame converged over 256 frames:
+
+| Configuration | Persistent error > 5/255 | > 15/255 | Frame time |
+|---|---:|---:|---:|
+| Full resolution, 48 samples (default) | 2.59% | 0.77% | 9.45 ms |
+| Half resolution, 24 samples | 4.17% | 1.07% | 5.37 ms |
+| **Half resolution, 48 samples** | **3.14%** | **0.60%** | **5.85 ms** |
+| Half resolution, 128 samples | 2.00% | 0.41% | — |
+| Every DoF pass with zero blur (fixed cost) | — | — | 4.93 ms |
+
+The blur itself goes from about 4.5 ms to about 0.9 ms. What is lost: an object that is only
+slightly out of focus (1–3 px of blur) cannot be blurred properly at half resolution, so its edges
+stay a bit too crisp; and in motion the remaining noise comes in 2×2 blocks instead of single
+pixels. The large blur and the bokeh are as accurate as at full resolution: with enough samples the
+half-resolution mode is even closer to the reference than the full-resolution default, because the
+same number of samples covers a disk with a quarter of the area.
+
+![Reference vs full resolution vs half resolution](docs/compare_half_res.png)
+
+*2× zoom, converged still frames, 28 px maximum blur radius. The lower edge of the center gem is
+slightly out of focus: soft in the reference, crisper in half resolution.*
+
 ## The scene
 
 Everything is computed in shaders every frame, with no scene textures and no baked lighting.
@@ -122,7 +171,8 @@ Everything is computed in shaders every frame, with no scene textures and no bak
 1. Install [Defold 1.14.0](https://defold.com/download/) or newer.
 2. Open `game.project` and choose **Project → Build** (Ctrl+B).
 3. Drag with the mouse to orbit the camera. **Expand settings** under the FPS counter opens
-   sliders for the blur, the lighting and the gem absorption.
+   sliders for the blur, the lighting and the gem absorption, and the button that switches the
+   blur between full and half resolution.
 
 The project has no dependencies and no native extensions. It also runs in the browser: bundle it
 with **Project → Bundle → HTML5** (or `bob --platform wasm-web`). The web build was tested in a
@@ -146,6 +196,8 @@ depth of field settings:
 | `DOF_TEMPORAL` | `true` | Temporal accumulation |
 | `DOF_TEMPORAL_SAMPLE_COUNT` | `48` | Samples per pixel per frame with accumulation |
 | `DOF_SAMPLE_COUNT` | `64` | Samples per pixel without accumulation |
+| `DOF_HALF_RESOLUTION` | `false` | Start in the half-resolution mode |
+| `DOF_HALF_RES_SAMPLE_COUNT` | `48` | Samples per half-resolution pixel per frame with accumulation |
 
 ## Project layout
 

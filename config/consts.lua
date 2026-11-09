@@ -38,6 +38,15 @@ M.DOF_TEMPORAL = true
 -- 128-sample reference, the share of pixels with a persistent error above 5/255 is
 -- 24 -> 1.7%, 32 -> 1.15%, 48 -> 0.67%, 64 -> 0.40% (original single pass: 0.9%).
 M.DOF_TEMPORAL_SAMPLE_COUNT = 48.0
+-- Half-resolution mode (fast path only): the blur is computed at half resolution and brought
+-- back to full size with depth-aware upsampling; in-focus pixels keep their full-resolution
+-- detail. Much cheaper, slightly less exact (see README). Also switchable at runtime with the
+-- button in the settings panel.
+M.DOF_HALF_RESOLUTION = false
+-- Kernel samples per half-resolution pixel per frame with accumulation. A half-resolution
+-- pixel covers four full-resolution ones, so the kernel is four times denser than at full
+-- resolution with the same count.
+M.DOF_HALF_RES_SAMPLE_COUNT = 48.0
 -- Averaging window in frames while the image is static, and while it is changing.
 M.DOF_TEMPORAL_MAX_FRAMES = 32.0
 M.DOF_TEMPORAL_MAX_FRAMES_MOVING = 8.0

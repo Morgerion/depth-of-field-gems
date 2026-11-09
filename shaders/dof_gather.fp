@@ -4,6 +4,11 @@
 // (scatter-as-gather, 5 depth layers, back-to-front compositing); only the data
 // sources and the number of samples iterated differ. Details in dof_fast_common.glsl.
 // Writes tone-mapped color to the screen, or HDR for dof_temporal.fp when accumulation is on.
+//
+// In half-resolution mode (u_dof_tiles.z = 1) the same gather runs on the downsampled scene
+// (dof_downsample.fp) with every size in half-resolution pixels. Each sample then reads color
+// and depth from one texel in a single fetch, and the output is HDR with the opacity of the
+// blurred layers in front of the pixel in alpha, for dof_composite.fp.
 
 uniform sampler2D u_source_sampler;
 uniform sampler2D u_tiles_sampler;
@@ -29,9 +34,17 @@ bool is_temporal() {
   return u_temporal.x > 0.5;
 }
 
-// With temporal accumulation HDR is written for dof_temporal.fp (which tone maps later);
-// without it the pixel goes straight to the screen.
-vec4 dof_output(vec3 hdr) {
+bool is_half_resolution() {
+  return u_dof_tiles.z > 0.5;
+}
+
+// Half resolution: HDR and the front layers' opacity for dof_composite.fp. Otherwise, with
+// temporal accumulation HDR is written for dof_temporal.fp (which tone maps later); without
+// it the pixel goes straight to the screen.
+vec4 dof_output(vec3 hdr, float front_alpha) {
+  if (is_half_resolution()) {
+    return vec4(hdr, front_alpha);
+  }
   if (is_temporal()) {
     return vec4(hdr, 1.0);
   }
@@ -57,7 +70,7 @@ void main() {
 
   // None of the neighbors is blurred: the original formula would return the pixel's own color.
   if (neighborhood_radius_px <= DOF_SOURCE_MIN_RADIUS_PX) {
-    color_out = dof_output(pixel_color);
+    color_out = dof_output(pixel_color, 0.0);
     return;
   }
 
@@ -91,14 +104,16 @@ void main() {
     }
 
     vec2 sample_uv = var_texcoord0 + disk * max_radius_px * u_full_texel.xy;
-    float sample_depth = load_scene_depth(sample_uv, size);
+    vec4 sample_texel = fetch_texel(u_source_sampler, floor(sample_uv * size), size);
+    float sample_depth = sample_texel.a;
     float sample_weight = dof_alpha_at_distance(compute_dof_radius(sample_depth, u_dof_focus), dist_px) * sample_boost;
     if (sample_weight <= 1e-5) {
       continue;
     }
 
-    dof_layers_add(layers, load_scene_color(sample_uv), sample_weight, sample_depth - pixel_depth, u_dof_focus);
+    vec3 sample_color = is_half_resolution() ? sample_texel.rgb : load_scene_color(sample_uv);
+    dof_layers_add(layers, sample_color, sample_weight, sample_depth - pixel_depth, u_dof_focus);
   }
 
-  color_out = dof_output(dof_layers_resolve(layers, pixel_color));
+  color_out = dof_output(dof_layers_resolve(layers, pixel_color), dof_layers_front_alpha(layers));
 }

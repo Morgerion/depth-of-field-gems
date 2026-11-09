@@ -3,6 +3,8 @@
 
 // Shared code for the DoF fast path: dof_prepare -> dof_tile_max -> dof_tile_dilate ->
 // dof_gather -> (dof_temporal -> dof_tonemap when temporal accumulation is on).
+// The half-resolution mode inserts dof_downsample before the tile passes, runs the tile passes
+// and the gather at half resolution and brings the result back with dof_composite.
 //
 // The fast path computes exactly the same formula as dof_present.fp, but:
 //   1. color and depth are unpacked once per frame into RGBA16F (rgb = HDR, a = linear
@@ -23,7 +25,7 @@ uniform fs_uniforms {
   // x = near plane, y = far plane.
   vec4 u_camera_clip;
   mat4 u_inv_proj;
-  // x = tile size in pixels, y = dilation radius in tiles.
+  // x = tile size in pixels, y = dilation radius in tiles, z = 1 for the half-resolution gather.
   vec4 u_dof_tiles;
   // Temporal accumulation (dof_temporal.fp): x = 1 if enabled, y = 1 if the image changed
   // this frame (camera, focus or settings), z = 1 if the camera moved (history needs

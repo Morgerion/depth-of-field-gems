@@ -175,6 +175,13 @@ vec4 dof_composite_over(vec4 top, vec4 bottom) {
   return top + bottom * (1.0 - top.a);
 }
 
+// Opacity of the layers in front of the pixel (mid-near and near) composited together.
+float dof_layers_front_alpha(DofLayers layers) {
+  float near_alpha = clamp(layers.near_weight, 0.0, 1.0);
+  float mid_near_alpha = clamp(layers.mid_near_weight, 0.0, 1.0);
+  return near_alpha + mid_near_alpha * (1.0 - near_alpha);
+}
+
 // Final HDR color of the pixel; `fallback` is used when no layer received any weight.
 vec3 dof_layers_resolve(DofLayers layers, vec3 fallback) {
   vec4 result = dof_resolve_layer(layers.far_color, layers.far_weight);
